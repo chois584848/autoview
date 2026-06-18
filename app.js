@@ -28,6 +28,7 @@ const state = {
   versions: {},          // { [versionNumber]: { preview, schema } } snapshots
   layout: { leftW: 460, schemaH: 250, min: { schema: false, chat: false, preview: false } },
   renamingProject: null, // index of project being renamed inline
+  renamingPlan: null,    // { pi, idx } of component being renamed inline
   view: 'home',          // home | editor | overview
   sidebarCollapsed: false,
   code: '',
@@ -323,9 +324,11 @@ function renderSidebar() {
             ? `<input class="rename-input" data-rename="${pi}" value="${escapeHtml(p.name)}" />`
             : `<span>${escapeHtml(p.name)}</span><span class="ti-more" data-project-menu="${pi}">${ic('more', 15)}</span>`}
         </div>
-        ${p.open ? p.plans.map(pl => `
-          <div class="tree-item child ${isActivePlan(p.name, pl) ? 'selected' : ''}" data-plan="${pl}" data-proj="${pi}">
-            <span>${pl}</span>
+        ${p.open ? p.plans.map((pl, idx) => (state.renamingPlan && state.renamingPlan.pi === pi && state.renamingPlan.idx === idx)
+          ? `<div class="tree-item child"><input class="rename-input" data-rename-plan="${pi}:${idx}" value="${escapeHtml(pl)}" /></div>`
+          : `<div class="tree-item child ${isActivePlan(p.name, pl) ? 'selected' : ''}" data-plan="${escapeHtml(pl)}" data-proj="${pi}">
+            <span>${escapeHtml(pl)}</span>
+            <span class="ti-more" data-plan-menu="${pi}:${idx}">${ic('more', 15)}</span>
           </div>`).join('') : ''}
       `).join('')
     : '';
@@ -1619,6 +1622,24 @@ function showDeleteProject(pi) {
   bindModalEvents();
 }
 
+function showDeleteComponent(pi, idx) {
+  const proj = projects[pi];
+  if (!proj || proj.plans[idx] == null) return;
+  const name = proj.plans[idx];
+  modalRoot.innerHTML = `
+    <div class="overlay" data-overlay>
+      <div class="modal">
+        <div class="modal-head"><h3>Delete “${escapeHtml(name)}”?</h3><button class="close" data-action="close-modal">×</button></div>
+        <p class="modal-desc">This component will be permanently deleted from “${escapeHtml(proj.name)}”. This action cannot be undone.</p>
+        <div class="modal-actions">
+          <button class="btn" data-action="close-modal">Cancel</button>
+          <button class="btn-danger btn" data-action="confirm-delete-component" data-pi="${pi}" data-idx="${idx}">Delete</button>
+        </div>
+      </div>
+    </div>`;
+  bindModalEvents();
+}
+
 // ===================== Context menus =====================
 function closeCtx() { const m = $('#ctx'); if (m) m.remove(); }
 
@@ -1744,26 +1765,53 @@ function bindEvents() {
     });
   });
 
-  // inline rename input
+  // component (plan) ⋯ menu
+  document.querySelectorAll('[data-plan-menu]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const [pi, idx] = el.dataset.planMenu.split(':').map(Number);
+      const r = el.getBoundingClientRect();
+      showCtxMenu(r.left, r.bottom + 4, [
+        { id: 'rename', icon: ic('edit'), label: 'Rename', action: () => { state.renamingPlan = { pi, idx }; render(); } },
+        { id: 'dup', icon: ic('copy'), label: 'Duplicate', action: () => toast('Duplicated') },
+        { divider: true },
+        { id: 'del', icon: ic('trash'), label: 'Delete', danger: true, action: () => showDeleteComponent(pi, idx) },
+      ]);
+    });
+  });
+
+  // inline rename input (project or component)
   const ri = $('.rename-input');
   if (ri) {
     ri.focus(); ri.select();
     const commit = () => {
-      const pi = +ri.dataset.rename;
       const name = ri.value.trim();
-      if (name) {
-        const old = projects[pi].name;
-        projects[pi].name = name;
-        if (state.active && state.active.project === old) state.active.project = name;
-        if (state.activeProject === old) state.activeProject = name;
+      if (ri.dataset.rename != null) {
+        const pi = +ri.dataset.rename;
+        if (name) {
+          const old = projects[pi].name;
+          projects[pi].name = name;
+          if (state.active && state.active.project === old) state.active.project = name;
+          if (state.activeProject === old) state.activeProject = name;
+        }
+        state.renamingProject = null;
+      } else if (ri.dataset.renamePlan != null) {
+        const [pi, idx] = ri.dataset.renamePlan.split(':').map(Number);
+        if (name && projects[pi]) {
+          const old = projects[pi].plans[idx];
+          projects[pi].plans[idx] = name;
+          if (state.active && state.active.kind === 'plan' && state.active.name === old && state.active.project === projects[pi].name) {
+            state.active.name = name; state.componentName = name;
+          }
+        }
+        state.renamingPlan = null;
       }
-      state.renamingProject = null;
       render();
     };
     ri.addEventListener('click', (e) => e.stopPropagation());
     ri.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); commit(); }
-      else if (e.key === 'Escape') { state.renamingProject = null; render(); }
+      else if (e.key === 'Escape') { state.renamingProject = null; state.renamingPlan = null; render(); }
     });
     ri.addEventListener('blur', commit);
   }
@@ -1933,6 +1981,19 @@ function handleAction(action, el, e) {
         state.active = null; state.view = 'home'; state.code = '';
       }
       closeModal(); render(); toast('Project deleted');
+      break;
+    }
+    case 'confirm-delete-component': {
+      const pi = +el.dataset.pi, idx = +el.dataset.idx;
+      const proj = projects[pi];
+      if (proj) {
+        const name = proj.plans[idx];
+        proj.plans.splice(idx, 1);
+        if (state.active && state.active.kind === 'plan' && state.active.name === name && state.active.project === proj.name) {
+          state.active = null; state.view = 'home'; state.code = '';
+        }
+      }
+      closeModal(); render(); toast('Component deleted');
       break;
     }
   }
@@ -2131,7 +2192,7 @@ function escapeHtml(s) {
 
 // global click closes context menu
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('#ctx') && !e.target.closest('[data-project-menu]') && !e.target.closest('[data-session-menu]') && !e.target.closest('[data-action="export-menu"]')) {
+  if (!e.target.closest('#ctx') && !e.target.closest('[data-project-menu]') && !e.target.closest('[data-plan-menu]') && !e.target.closest('[data-session-menu]') && !e.target.closest('[data-action="export-menu"]')) {
     closeCtx();
   }
 });
